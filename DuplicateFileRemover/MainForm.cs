@@ -164,7 +164,7 @@ namespace DuplicateFileRemover
             }
 
             // Switch to the scanning tab
-            tabControlMain.SelectedTab = tabPageScanProgress;
+            tabControlMain.SelectedTab = tabPageProgress;
 
             // Prepare scanning options
             ScanOptions options = new()
@@ -544,5 +544,140 @@ namespace DuplicateFileRemover
         }
 
 
+        // 2) The button click just prepares the list and starts the worker
+        private void ButtonDeleteSelected_Click(object sender, EventArgs e)
+        {
+            buttonDeleteSelected.Enabled = false;  // disable the button to prevent double-click
+            // Gather selected files
+            List<string> filesToDelete = new List<string>();
+            foreach (DataGridViewRow row in dataGridViewResults.Rows)
+            {
+                bool isChecked = row.Cells[0].Value is bool val && val;
+                if (isChecked && row.Cells[1].Value is string path)
+                {
+                    filesToDelete.Add(path);
+                }
+            }
+
+            if (filesToDelete.Count == 0)
+            {
+                MessageBox.Show("No files selected for deletion.");
+                buttonDeleteSelected.Enabled = true; // re-enable the button
+                return;
+            }
+
+            DialogResult confirm = MessageBox.Show(
+                $"Are you sure you want to move {filesToDelete.Count} file(s) to the Recycle Bin?",
+                "Confirm Delete",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (confirm == DialogResult.Yes)
+            {
+                tabControlMain.SelectedTab = tabPageProgress;
+                backgroundWorkerDelete.RunWorkerAsync(filesToDelete);
+            }
+            else
+            {
+                buttonDeleteSelected.Enabled = true; // re-enable the button
+            }
+        }
+
+        // 3) DoWork on the second BackgroundWorker
+        private void BackgroundWorkerDelete_DoWork(object sender, DoWorkEventArgs e)
+        {
+            BackgroundWorker worker = (BackgroundWorker)sender;
+            if (e.Argument is not List<string> filesToDelete)
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            int successCount = 0;
+            int totalCount = 0;
+            int fileCount = filesToDelete.Count;
+
+            foreach (string file in filesToDelete)
+            {
+                if (worker.CancellationPending)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+
+                try
+                {
+                    // This can be slow if 100k files are going to the Recycle Bin, but 
+                    // at least it's on a background thread, so it won't block the UI.
+                    Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
+                        file,
+                        Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                        Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+
+                    successCount++;
+                }
+                catch (Exception ex)
+                {
+                    // Log or handle individual file errors
+                    Console.WriteLine($"Error deleting {file}: {ex.Message}");
+                }
+
+                totalCount++;
+                // We can report progress every so often (e.g., every 1%, or every N files)
+                if (totalCount % 1000 == 0 || totalCount == fileCount)
+                {
+                    int percentDone = (int)((double)totalCount / fileCount * 100);
+                    worker.ReportProgress(percentDone, new { successCount, totalCount });
+                }
+            }
+
+            // Store results in e.Result for use in RunWorkerCompleted
+            e.Result = (successCount, totalCount);
+        }
+
+        // 4) Update progress in ProgressChanged
+        private void BackgroundWorkerDelete_ProgressChanged(object sender, ProgressChangedEventArgs e)
+        {
+            // e.ProgressPercentage is overall progress
+            progressBar.Value = Math.Min(100, e.ProgressPercentage);
+
+            // If you want, you can read the successCount, totalCount from e.UserState
+            if (e.UserState is { } userState)
+            {
+                var propSuccess = userState.GetType().GetProperty("successCount");
+                var propTotal = userState.GetType().GetProperty("totalCount");
+                if (propSuccess != null && propTotal != null)
+                {
+                    int sc = (int)(propSuccess.GetValue(userState) ?? 0);
+                    int tc = (int)(propTotal.GetValue(userState) ?? 0);
+                    labelProgressInfo.Text = $"Deleting... {sc} / {tc} deleted.";
+                }
+            }
+        }
+
+        // 5) Once done
+        private void BackgroundWorkerDelete_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
+        {
+            buttonDeleteSelected.Enabled = true;
+            progressBar.Value = 100;
+
+            if (e.Cancelled)
+            {
+                labelProgressInfo.Text = "Deletion canceled.";
+            }
+            else if (e.Error != null)
+            {
+                labelProgressInfo.Text = $"Error: {e.Error.Message}";
+            }
+            else
+            {
+                (int successCount, int totalCount) result = ((int, int))e.Result;
+                labelProgressInfo.Text = $"Deleted {result.successCount} of {result.totalCount} files to Recycle Bin.";
+                MessageBox.Show($"Deleted {result.successCount} file(s) to the Recycle Bin.");
+            }
+
+            // Now display final duplicates
+            tabControlMain.SelectedTab = tabPageResults;
+        }
     }
 }
